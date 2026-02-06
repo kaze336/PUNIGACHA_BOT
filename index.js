@@ -15,8 +15,8 @@ const fs = require("fs");
 
 /* ========= 設定 ========= */
 const TOKEN = process.env.DISCORD_TOKEN;
-const GACHA_CHANNEL_ID = process.env.GACHA_CHANNEL_ID;
-const RANK_CHANNEL_ID = process.env.RANK_CHANNEL_ID;
+const GACHA_CHANNEL_ID = "1455005226892398826";
+const RANK_CHANNEL_ID = "1455005604278964245";
 const COOLDOWN_MIN = 60;
 
 /* ========= Render用Webサーバー (ポートバインディング) ========= */
@@ -391,6 +391,7 @@ client.on("interactionCreate", async (i) => {
     return i.reply("全員のポイントを0にリセットしました");
   }
 });
+
 
 
 client.login(TOKEN);
