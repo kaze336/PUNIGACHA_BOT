@@ -128,17 +128,33 @@ function getUserRank(uid) {
 async function updateRankingChannel() {
   try {
     const ch = await client.channels.fetch(RANK_CHANNEL_ID);
+    if (!ch || !ch.messages) return;
+
     const top20 = getSortedRank().slice(0, 20);
 
-    const embed = new EmbedBuilder().setTitle("🏆 ガチャランキング TOP20");
+    const embed = new EmbedBuilder()
+      .setTitle("🏆 ガチャランキング TOP20")
+      .setColor(0xffd700)
+      .setTimestamp();
+
     top20.forEach((u, i) =>
       embed.addFields({ name: `${i + 1}位 ${u[1].name}`, value: `${u[1].point}pt` }),
     );
 
-    const msgs = await ch.messages.fetch({ limit: 5 });
-    if (msgs.size > 0) {
-      await ch.bulkDelete(msgs).catch(e => console.error("以前のメッセージの削除に失敗しました (権限不足などの可能性):", e.message));
-    }
+    // チャンネル内の全メッセージを削除（常に最新のランキングのみを表示するため）
+    let fetched;
+    do {
+      fetched = await ch.messages.fetch({ limit: 100 });
+      if (fetched.size > 0) {
+        await ch.bulkDelete(fetched).catch(async (e) => {
+          // 14日以上前のメッセージが含まれる場合の個別削除
+          for (const m of fetched.values()) {
+            await m.delete().catch(() => { });
+          }
+        });
+      }
+    } while (fetched.size > 0);
+
     await ch.send({ embeds: [embed] });
   } catch (e) {
     console.error("ランキング更新中にエラーが発生しました:", e);
@@ -384,9 +400,10 @@ client.on("interactionCreate", async (i) => {
 
     /* --- ランキング操作 --- */
     if (i.isChatInputCommand() && i.commandName === "rank_user") {
+      await i.deferReply({ ephemeral: true });
       addPoint(i.options.getUser("user"), i.options.getInteger("point"));
       await updateRankingChannel();
-      return i.reply("操作完了");
+      return i.editReply("操作完了");
     }
 
     if (i.isChatInputCommand() && i.commandName === "rank_reset") {
@@ -400,6 +417,7 @@ client.on("interactionCreate", async (i) => {
       const topUserId = sortedDetails[0][0];
 
       try {
+        await i.deferReply();
         // 1. 過去ランキングチャンネルへ投稿
         const pastCh = await client.channels.fetch(PAST_RANK_CHANNEL_ID).catch(() => null);
         if (pastCh) {
@@ -416,24 +434,7 @@ client.on("interactionCreate", async (i) => {
           await pastCh.send(`🎉 **今月の一位は <@${topUserId}> さんでした。おめでとうございます！！**`);
         }
 
-        // 2. 月間ランキングチャンネルの履歴をすべて削除
-        const rankCh = await client.channels.fetch(RANK_CHANNEL_ID).catch(() => null);
-        if (rankCh) {
-          let fetched;
-          do {
-            fetched = await rankCh.messages.fetch({ limit: 100 });
-            if (fetched.size > 0) {
-              await rankCh.bulkDelete(fetched).catch(async (e) => {
-                // 14日以上前のメッセージがある場合の個別削除
-                for (const m of fetched.values()) {
-                  await m.delete().catch(() => { });
-                }
-              });
-            }
-          } while (fetched.size > 0);
-        }
-
-        // 3. 1位のユーザーに個別にDMを送る (既存機能)
+        // 2. 1位のユーザーに個別にDMを送る
         try {
           const topUser = await client.users.fetch(topUserId);
           await topUser.send(
@@ -443,16 +444,19 @@ client.on("interactionCreate", async (i) => {
           console.error("1位のユーザーへのDM送信に失敗しました:", e);
         }
 
-        // 4. ポイントをリセット
+        // 3. ポイントをリセット
         Object.keys(r).forEach((uid) => {
           r[uid].point = 0;
         });
         save("./ranking.json", r);
         await updateRankingChannel();
 
-        return i.reply("ランキングを過去ログに保存し、月間ランキングをリセットしました。");
+        return i.editReply("ランキングを過去ログに保存し、月間ランキングをリセットしました。");
       } catch (err) {
         console.error("リセット処理中にエラーが発生しました:", err);
+        if (i.deferred || i.replied) {
+          return i.editReply({ content: "リセット処理中にエラーが発生しました。PAST_RANK_CHANNEL_IDを確認してください。" });
+        }
         return i.reply({ content: "リセット処理中にエラーが発生しました。PAST_RANK_CHANNEL_IDを確認してください。", ephemeral: true });
       }
     }
