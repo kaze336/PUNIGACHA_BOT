@@ -21,6 +21,7 @@ const GACHA_CHANNEL_ID = "1455005226892398826";
 const RANK_CHANNEL_ID = "1455005604278964245";
 const PAST_RANK_CHANNEL_ID = "1469382279800295567";
 const COOLDOWN_MIN = 60;
+const GAS_WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbwCRUlvjCqqrpaXP6bxfB_xrXi0CMrPTRaBjBL1C-zEBf1sPDRsRk9dObIKV3RrKOVH/exec";
 
 
 /* ========= Render用Webサーバー (ポートバインディング) ========= */
