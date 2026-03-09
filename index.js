@@ -1,3 +1,4 @@
+require('dotenv').config();
 const {
   Client,
   GatewayIntentBits,
@@ -51,6 +52,25 @@ const save = (f, d) => {
     console.error(`Error saving ${f}:`, e);
   }
 };
+
+async function saveToSheet(type, data) {
+  const gasUrl = process.env.GAS_WEBHOOK_URL;
+  if (!gasUrl) return;
+
+  try {
+    await fetch(gasUrl, {
+      method: "POST",
+      body: JSON.stringify({
+        type: type,
+        timestamp: new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" }),
+        ...data
+      })
+    });
+  } catch (err) {
+    console.error(`GAS sync failed (${type}):`, err);
+  }
+}
+async function syncToGas(type, data) { await saveToSheet(type, data); } // 既存の呼び出し箇所の互換性維持
 
 const RANK_POINT = {
   "uz+": 10,
@@ -117,6 +137,12 @@ function addPoint(user, pt) {
   if (!r[user.id]) r[user.id] = { name: user.username, point: 0 };
   r[user.id].point += pt;
   save("./ranking.json", r);
+  syncToGas("point_update", {
+    user_id: user.id,
+    user_name: user.username,
+    added_point: pt,
+    total_point: r[user.id].point
+  });
 }
 function getSortedRank() {
   const r = load("./ranking.json");
@@ -161,6 +187,27 @@ async function updateRankingChannel() {
   }
 }
 
+async function refreshGachaData() {
+  const gasUrl = process.env.GAS_WEBHOOK_URL;
+  if (!gasUrl) return { success: false, message: "GAS_WEBHOOK_URLが設定されていません。" };
+
+  try {
+    const response = await fetch(`${gasUrl}?type=get_gacha`);
+    if (!response.ok) throw new Error("GASからのデータ取得に失敗しました。");
+
+    const data = await response.json();
+    if (data && data.characters) {
+      save("./gacha.json", data);
+      return { success: true, message: "ガチャデータを更新しました。" };
+    } else {
+      return { success: false, message: "取得したデータが不正です。" };
+    }
+  } catch (e) {
+    console.error("Gacha sync error:", e);
+    return { success: false, message: `エラー: ${e.message}` };
+  }
+}
+
 /* ========= 起動時 ========= */
 client.once("ready", async () => {
   const commands = [
@@ -187,9 +234,14 @@ client.once("ready", async () => {
       .setName("rank_reset")
       .setDescription("全員のポイントを0にリセット")
       .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+    new SlashCommandBuilder()
+      .setName("gacha_sync")
+      .setDescription("スプレッドシートからガチャデータを同期する")
+      .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   ];
   await client.application.commands.set(commands);
-  console.log("起動完了");
+  console.log(`起動完了: ${client.user.tag}`);
+  console.log(`所属サーバー数: ${client.guilds.cache.size}`);
 });
 
 /* ========= Interaction ========= */
@@ -203,9 +255,15 @@ client.on("interactionCreate", async (i) => {
       const gachaData = load("./gacha.json");
       const title = gachaData.gacha_name ? `🎰 ${gachaData.gacha_name}` : "🎰 ガチャパネル";
 
+      const embed = new EmbedBuilder()
+        .setTitle(title)
+        .setDescription("下のボタンを押して10連ガチャを引こう！")
+        .setColor(0x00ae86)
+        .setImage(gachaData.gacha_image || null); // 画像が設定されていれば表示
+
       try {
         await channel.send({
-          content: title,
+          embeds: [embed],
           components: [
             new ActionRowBuilder().addComponents(
               new ButtonBuilder()
@@ -295,28 +353,18 @@ client.on("interactionCreate", async (i) => {
       // 現在の順位を取得
       const currentRank = getUserRank(i.user.id);
 
-      // スプレッドシートへデータ送信 (GAS Webhook URLが存在する場合のみ実行)
-      if (process.env.GAS_WEBHOOK_URL) {
-        const gasUrl = process.env.GAS_WEBHOOK_URL;
-        const gachaName = load("./gacha.json").gacha_name || "ガチャ";
-        const pulledText = results.map((c) => `[${c.rank.toUpperCase()}] ${c.name}`).join(", ");
-        const userCurrentPt = (load("./ranking.json")[i.user.id] || { point: 0 }).point;
+      // スプレッドシートへデータ送信
+      const gachaName = load("./gacha.json").gacha_name || "ガチャ";
+      const pulledText = results.map((c) => `[${c.rank.toUpperCase()}] ${c.name}`).join(", ");
+      const userCurrentPt = (load("./ranking.json")[i.user.id] || { point: 0 }).point;
 
-        // POSTするデータ (日時、ID、ユーザー名、ガチャ名、中身、累計ポイント)
-        const postData = {
-          date: new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" }),
-          user_id: i.user.id,
-          user_name: i.user.username,
-          gacha_name: gachaName,
-          contents: pulledText,
-          points: userCurrentPt
-        };
-
-        fetch(gasUrl, {
-          method: "POST",
-          body: JSON.stringify(postData)
-        }).catch(err => console.error("GASへの送信に失敗しました:", err));
-      }
+      await saveToSheet("gacha_draw", {
+        user_id: i.user.id,
+        user_name: i.user.username,
+        gacha_name: gachaName,
+        contents: pulledText,
+        points: userCurrentPt
+      });
 
       embed.addFields(
         { name: "━━━━━━━━━━━━━━━", value: "\u200B" }, // 区切り線
@@ -354,6 +402,7 @@ client.on("interactionCreate", async (i) => {
       const d = load("./gacha.json");
       d.gacha_name = i.fields.getTextInputValue("name");
       save("./gacha.json", d);
+      syncToGas("gacha_name_update", { gacha_name: d.gacha_name });
       return i.reply({ content: "変更しました", ephemeral: true });
     }
 
@@ -376,14 +425,16 @@ client.on("interactionCreate", async (i) => {
         return i.reply({ content: "ID重複", ephemeral: true });
 
 
-      d.characters.push({
+      const newChar = {
         id: i.fields.getTextInputValue("id"),
         rank: i.fields.getTextInputValue("rank"),
         name: i.fields.getTextInputValue("name"),
         image: i.fields.getTextInputValue("image"),
         rate: Number(i.fields.getTextInputValue("rate")),
-      });
+      };
+      d.characters.push(newChar);
       save("./gacha.json", d);
+      syncToGas("character_add", newChar);
       return i.reply({ content: "追加しました", ephemeral: true });
     }
 
@@ -401,10 +452,12 @@ client.on("interactionCreate", async (i) => {
       const d = load("./gacha.json");
       if (!d.characters) d.characters = [];
       const before = d.characters.length;
-      d.characters = d.characters.filter((c) => c.id !== i.fields.getTextInputValue("id"));
+      const removeId = i.fields.getTextInputValue("id");
+      d.characters = d.characters.filter((c) => c.id !== removeId);
       if (before === d.characters.length)
         return i.reply({ content: "見つかりません", ephemeral: true });
       save("./gacha.json", d);
+      syncToGas("character_remove", { id: removeId });
       return i.reply({ content: "削除しました", ephemeral: true });
     }
 
@@ -482,6 +535,13 @@ client.on("interactionCreate", async (i) => {
         }
         return i.reply({ content: "リセット処理中にエラーが発生しました。PAST_RANK_CHANNEL_IDを確認してください。", ephemeral: true });
       }
+    }
+
+    /* --- ガチャ同期 --- */
+    if (i.isChatInputCommand() && i.commandName === "gacha_sync") {
+      await i.deferReply({ ephemeral: true });
+      const result = await refreshGachaData();
+      return i.editReply(result.message);
     }
 
   } catch (error) {
